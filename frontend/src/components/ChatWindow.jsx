@@ -1,0 +1,324 @@
+import { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  Phone, Video, MoreVertical, Smile, Paperclip,
+  Mic, Send, X, Users, MessageCircle, ArrowDown,
+} from 'lucide-react';
+import Avatar from './Avatar';
+import MessageBubble from './MessageBubble';
+import EmojiPicker from './EmojiPicker';
+import { useChat } from '../context/ChatContext';
+import {
+  groupMessages, formatLastSeen, getRoomDisplayName,
+  getRoomColor, getDMPartnerId,
+} from '../utils/helpers';
+
+// ─── Typing Indicator ──────────────────────────────────────────────────────────
+function TypingIndicator({ typers }) {
+  if (typers.length === 0) return null;
+  const label =
+    typers.length === 1
+      ? `${typers[0].username} is typing`
+      : `${typers.map((t) => t.username).join(', ')} are typing`;
+
+  return (
+    <div className="typing-indicator">
+      <div className="typing-bubble">
+        <div className="typing-dot" />
+        <div className="typing-dot" />
+        <div className="typing-dot" />
+      </div>
+      <span className="typing-label">{label}</span>
+    </div>
+  );
+}
+
+// ─── Welcome pane ──────────────────────────────────────────────────────────────
+function WelcomePane() {
+  return (
+    <div className="chat-window-empty">
+      <div className="chat-window-empty-icon">
+        <MessageCircle size={48} strokeWidth={1} />
+      </div>
+      <h2>Welcome to TatheerApp</h2>
+      <p>Select a conversation from the sidebar or start a new chat to begin messaging.</p>
+      <div className="welcome-features">
+        {['Real-time messaging', 'Group chats', 'Message reactions', 'Reply threads'].map((f) => (
+          <div key={f} className="welcome-feature">
+            <span className="welcome-feature-dot" />
+            {f}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Main ChatWindow ───────────────────────────────────────────────────────────
+export default function ChatWindow() {
+  const {
+    currentUser, rooms, activeRoomId, messages, typingUsers,
+    onlineUsers, sendMessage, startTyping, stopTyping,
+  } = useChat();
+
+  const [inputText, setInputText] = useState('');
+  const [replyTo, setReplyTo] = useState(null);
+  const [showEmoji, setShowEmoji] = useState(false);
+  const [showScrollBtn, setShowScrollBtn] = useState(false);
+
+  const messagesEndRef = useRef(null);
+  const messagesAreaRef = useRef(null);
+  const inputRef = useRef(null);
+  const typingTimerRef = useRef(null);
+
+  const activeRoom = rooms.find((r) => r.id === activeRoomId);
+  const roomMessages = (activeRoomId ? messages[activeRoomId] : []) || [];
+  const typers = (activeRoomId ? typingUsers[activeRoomId] : []) || [];
+  const grouped = groupMessages(roomMessages);
+
+  // ── Room meta ──────────────────────────────────────────────────────────────
+  const displayName = activeRoom ? getRoomDisplayName(activeRoom, currentUser?.id) : '';
+  const color = activeRoom ? getRoomColor(activeRoom, currentUser?.id) : '#00a884';
+  const partnerId = activeRoom ? getDMPartnerId(activeRoom, currentUser?.id) : null;
+  const partnerUser = partnerId ? onlineUsers.find((u) => u.id === partnerId) : null;
+  const isPartnerOnline = !!partnerUser;
+  const statusText =
+    activeRoom?.type === 'group'
+      ? `${activeRoom.members?.length || 0} members`
+      : isPartnerOnline
+      ? 'Online'
+      : formatLastSeen(null);
+
+  // ── Auto-scroll ────────────────────────────────────────────────────────────
+  const scrollToBottom = useCallback((smooth = true) => {
+    messagesEndRef.current?.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto' });
+  }, []);
+
+  useEffect(() => {
+    scrollToBottom(false);
+  }, [activeRoomId]);
+
+  useEffect(() => {
+    const area = messagesAreaRef.current;
+    if (!area) return;
+    const isNearBottom = area.scrollHeight - area.scrollTop - area.clientHeight < 200;
+    if (isNearBottom) scrollToBottom();
+  }, [roomMessages.length, scrollToBottom]);
+
+  // ── Scroll button visibility ───────────────────────────────────────────────
+  const handleScroll = () => {
+    const area = messagesAreaRef.current;
+    if (!area) return;
+    const far = area.scrollHeight - area.scrollTop - area.clientHeight > 400;
+    setShowScrollBtn(far);
+  };
+
+  // ── Scroll to specific message ─────────────────────────────────────────────
+  const scrollToMessage = (msgId) => {
+    const el = document.getElementById(`msg-${msgId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('highlight');
+      setTimeout(() => el.classList.remove('highlight'), 1500);
+    }
+  };
+
+  // ── Input handling ─────────────────────────────────────────────────────────
+  const handleInput = (e) => {
+    setInputText(e.target.value);
+
+    // Typing indicator
+    clearTimeout(typingTimerRef.current);
+    startTyping();
+    typingTimerRef.current = setTimeout(stopTyping, 2500);
+
+    // Auto-grow textarea
+    e.target.style.height = 'auto';
+    e.target.style.height = Math.min(e.target.scrollHeight, 140) + 'px';
+  };
+
+  const handleSend = () => {
+    const text = inputText.trim();
+    if (!text) return;
+    sendMessage(text, replyTo?.id || null);
+    setInputText('');
+    setReplyTo(null);
+    stopTyping();
+    if (inputRef.current) {
+      inputRef.current.style.height = 'auto';
+      inputRef.current.focus();
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+    if (e.key === 'Escape') {
+      setReplyTo(null);
+      setShowEmoji(false);
+    }
+  };
+
+  const handleEmojiSelect = (emoji) => {
+    setInputText((prev) => prev + emoji);
+    inputRef.current?.focus();
+  };
+
+  if (!activeRoomId || !activeRoom) return <WelcomePane />;
+
+  return (
+    <div className="chat-window">
+      {/* ── Chat Header ── */}
+      <header className="chat-header">
+        <div className="chat-header-info">
+          {activeRoom.type === 'group' ? (
+            <div className="group-avatar-md">
+              <span>{activeRoom.icon || '👥'}</span>
+            </div>
+          ) : (
+            <Avatar
+              name={displayName}
+              color={color}
+              size="sm"
+              showOnline={activeRoom.type === 'direct'}
+              isOnline={isPartnerOnline}
+            />
+          )}
+          <div className="chat-header-text">
+            <div className="chat-header-name">{displayName}</div>
+            <div className={`chat-header-status ${isPartnerOnline || activeRoom.type === 'group' ? 'online' : ''}`}>
+              {typers.length > 0
+                ? `${typers.map((t) => t.username).join(', ')} ${typers.length === 1 ? 'is' : 'are'} typing…`
+                : statusText}
+            </div>
+          </div>
+        </div>
+        <div className="chat-header-actions">
+          <button className="icon-btn tooltip" data-tooltip="Voice call" onClick={() => alert('Voice call — coming soon!')}>
+            <Phone size={18} />
+          </button>
+          <button className="icon-btn tooltip" data-tooltip="Video call" onClick={() => alert('Video call — coming soon!')}>
+            <Video size={18} />
+          </button>
+          {activeRoom.type === 'group' && (
+            <button className="icon-btn tooltip" data-tooltip="Group members">
+              <Users size={18} />
+            </button>
+          )}
+          <button className="icon-btn tooltip" data-tooltip="More options">
+            <MoreVertical size={18} />
+          </button>
+        </div>
+      </header>
+
+      {/* ── Messages ── */}
+      <div
+        className="messages-area"
+        ref={messagesAreaRef}
+        onScroll={handleScroll}
+      >
+        {grouped.length === 0 ? (
+          <div className="no-messages">
+            <MessageCircle size={40} strokeWidth={1} />
+            <p>No messages yet. Say hello! 👋</p>
+          </div>
+        ) : (
+          grouped.map((item) => {
+            if (item.type === 'date') {
+              return (
+                <div key={item.id} className="date-separator">
+                  <span className="date-separator-text">{item.date}</span>
+                </div>
+              );
+            }
+            return (
+              <div key={item.message.id} id={`msg-${item.message.id}`}>
+                <MessageBubble
+                  message={item.message}
+                  isGrouped={item.isGrouped}
+                  messages={roomMessages}
+                  onReply={(msg) => { setReplyTo(msg); inputRef.current?.focus(); }}
+                  onScrollTo={scrollToMessage}
+                />
+              </div>
+            );
+          })
+        )}
+
+        {/* Typing indicator */}
+        <TypingIndicator typers={typers.filter((t) => t.userId !== currentUser?.id)} />
+
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* ── Scroll to bottom button ── */}
+      {showScrollBtn && (
+        <button className="scroll-to-bottom" onClick={() => scrollToBottom()}>
+          <ArrowDown size={18} />
+        </button>
+      )}
+
+      {/* ── Reply bar ── */}
+      {replyTo && (
+        <div className="reply-bar">
+          <div className="reply-bar-accent" />
+          <div className="reply-bar-content">
+            <div className="reply-bar-name">{replyTo.senderName}</div>
+            <div className="reply-bar-text">
+              {replyTo.deleted ? '🚫 Deleted message' : replyTo.content}
+            </div>
+          </div>
+          <button className="icon-btn" onClick={() => setReplyTo(null)}>
+            <X size={16} />
+          </button>
+        </div>
+      )}
+
+      {/* ── Emoji Picker ── */}
+      {showEmoji && (
+        <EmojiPicker
+          onSelect={handleEmojiSelect}
+          onClose={() => setShowEmoji(false)}
+        />
+      )}
+
+      {/* ── Input Bar ── */}
+      <div className="message-input-area">
+        <button
+          className={`icon-btn ${showEmoji ? 'active' : ''}`}
+          onClick={() => setShowEmoji((p) => !p)}
+          title="Emoji"
+        >
+          <Smile size={22} />
+        </button>
+
+        <button className="icon-btn" title="Attach file (coming soon)" onClick={() => alert('File attachment — coming soon!')}>
+          <Paperclip size={20} />
+        </button>
+
+        <div className="message-input-wrapper">
+          <textarea
+            ref={inputRef}
+            className="message-textarea"
+            placeholder="Type a message…"
+            value={inputText}
+            onChange={handleInput}
+            onKeyDown={handleKeyDown}
+            rows={1}
+          />
+        </div>
+
+        {inputText.trim() ? (
+          <button className="send-btn" onClick={handleSend} title="Send">
+            <Send size={20} />
+          </button>
+        ) : (
+          <button className="send-btn mic" title="Voice message (coming soon)" onClick={() => alert('Voice messages — coming soon!')}>
+            <Mic size={20} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
