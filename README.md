@@ -75,7 +75,14 @@ For email registration and login, set up [EmailJS](https://www.emailjs.com/):
 3. Enable "Allow API requests" in Account → Security
 4. Copy `backend/.env.example` to `backend/.env` and add your keys
 
-### 6. Test with multiple users
+### 6. Use on phone (same WiFi)
+
+1. Find your computer's IP: `ipconfig` (Windows) or `ifconfig` (Mac/Linux)
+2. On your phone, open `http://<your-ip>:5173` (e.g. `http://192.168.1.5:5173`)
+3. Register/login works — API auto-uses same hostname on port 3001
+4. **Install as app:** Add to Home Screen (browser menu → "Add to Home Screen")
+
+### 7. Test with multiple users
 
 Open multiple browser tabs (or incognito windows), enter different usernames, and chat in real time.
 

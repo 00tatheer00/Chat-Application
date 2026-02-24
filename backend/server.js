@@ -19,7 +19,7 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: ['http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:5175', 'http://127.0.0.1:5175'],
+    origin: true,
     methods: ['GET', 'POST'],
   },
 });
@@ -639,8 +639,9 @@ const PORT = process.env.PORT || 3001;
 async function start() {
   await connectDB();
   await ensureGeneralRoom();
-  server.listen(PORT, () => {
+  server.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 TatheerApp server running on http://localhost:${PORT}`);
+    console.log(`   Access from phone: http://<your-ip>:${PORT}`);
   });
 }
 

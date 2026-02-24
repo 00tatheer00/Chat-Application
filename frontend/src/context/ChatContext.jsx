@@ -1,6 +1,7 @@
 import { createContext, useContext, useReducer, useRef, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { io } from 'socket.io-client';
+import { getApiUrl } from '../config';
 
 const ChatContext = createContext(null);
 
@@ -250,7 +251,7 @@ export function ChatProvider({ children }) {
   const getSocket = useCallback(() => {
     if (socketRef.current) return socketRef.current;
 
-    const socket = io('http://localhost:3001', {
+    const socket = io(getApiUrl(), {
       transports: ['websocket'],
       reconnection: true,
       reconnectionAttempts: 10,

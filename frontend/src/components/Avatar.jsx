@@ -1,5 +1,5 @@
 import { getInitials } from '../utils/helpers';
-import { API_URL } from '../config';
+import { getApiUrl } from '../config';
 
 export default function Avatar({ name, color, size = 'md', showOnline = false, isOnline = false, src }) {
   const sizes = {
@@ -11,7 +11,7 @@ export default function Avatar({ name, color, size = 'md', showOnline = false, i
   };
   const { wh, fs } = sizes[size] || sizes.md;
 
-  const imageUrl = src?.startsWith('/') ? `${API_URL}${src}` : src;
+  const imageUrl = src?.startsWith('/') ? `${getApiUrl()}${src}` : src;
 
   return (
     <div style={{ position: 'relative', flexShrink: 0, width: wh, height: wh }}>

@@ -10,7 +10,7 @@ const AVATAR_COLORS = [
   '#ffeb3b', '#ff9800', '#ff5722', '#795548',
 ];
 
-const API_URL = 'http://localhost:3001';
+import { getApiUrl } from '../config';
 
 export default function AuthScreen({ mode = 'register', onSwitchMode, onBack }) {
   const [step, setStep] = useState(1);
@@ -46,7 +46,7 @@ export default function AuthScreen({ mode = 'register', onSwitchMode, onBack }) 
     }
     setLoading(true);
     try {
-      const res = await fetch(`${API_URL}/api/auth/request-otp`, {
+      const res = await fetch(`${getApiUrl()}/api/auth/request-otp`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -74,7 +74,7 @@ export default function AuthScreen({ mode = 'register', onSwitchMode, onBack }) 
     }
     setLoading(true);
     try {
-      const res = await fetch(`${API_URL}/api/auth/verify-otp`, {
+      const res = await fetch(`${getApiUrl()}/api/auth/verify-otp`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: email.trim().toLowerCase(), otp: otp.trim() }),
