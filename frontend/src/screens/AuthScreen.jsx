@@ -55,7 +55,13 @@ export default function AuthScreen({ mode = 'register', onSwitchMode, onBack }) 
           color: isRegister ? selectedColor : undefined,
         }),
       });
-      const data = await res.json();
+      const text = await res.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error('Backend not reachable. Set VITE_API_URL in Vercel to your Railway URL.');
+      }
       if (!res.ok) throw new Error(data.error || 'Failed to send OTP');
       setStep(2);
     } catch (err) {
@@ -79,7 +85,13 @@ export default function AuthScreen({ mode = 'register', onSwitchMode, onBack }) 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: email.trim().toLowerCase(), otp: otp.trim() }),
       });
-      const data = await res.json();
+      const text = await res.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error('Backend not reachable. Set VITE_API_URL in Vercel to your Railway URL.');
+      }
       if (!res.ok) throw new Error(data.error || 'Invalid OTP');
       joinChat(data.user.username, data.user.color);
     } catch (err) {
