@@ -53,6 +53,40 @@ function reducer(state, action) {
     case 'USER_OFFLINE':
       return { ...state, onlineUsers: action.payload.onlineUsers };
 
+    case 'USER_UPDATED': {
+      const { user } = action.payload;
+      return {
+        ...state,
+        error: null,
+        currentUser: { ...state.currentUser, ...user },
+        onlineUsers: state.onlineUsers.map((u) =>
+          u.id === user.id ? { ...u, ...user } : u
+        ),
+        rooms: state.rooms.map((r) => {
+          if (r.memberNames?.[user.id]) {
+            return { ...r, memberNames: { ...r.memberNames, [user.id]: user.username }, memberColors: { ...r.memberColors, [user.id]: user.color } };
+          }
+          return r;
+        }),
+      };
+    }
+
+    case 'USER_PROFILE_UPDATED': {
+      const { userId, user } = action.payload;
+      return {
+        ...state,
+        onlineUsers: state.onlineUsers.map((u) =>
+          u.id === userId ? { ...u, ...user } : u
+        ),
+        rooms: state.rooms.map((r) => {
+          if (r.memberNames?.[userId]) {
+            return { ...r, memberNames: { ...r.memberNames, [userId]: user.username }, memberColors: { ...r.memberColors, [userId]: user.color } };
+          }
+          return r;
+        }),
+      };
+    }
+
     case 'SET_ACTIVE_ROOM':
       return {
         ...state,
@@ -205,7 +239,12 @@ export function ChatProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, initialState);
   const socketRef = useRef(null);
   const typingTimers = useRef({});
+  const currentUserRef = useRef(null);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    currentUserRef.current = state.currentUser;
+  }, [state.currentUser]);
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
   const getSocket = useCallback(() => {
@@ -224,7 +263,8 @@ export function ChatProvider({ children }) {
 
     socket.on('message:new', (message) => {
       dispatch({ type: 'NEW_MESSAGE', payload: { message } });
-      if (message.senderId !== socket.id && message.type !== 'system') {
+      const myId = currentUserRef.current?.id;
+      if (message.senderId !== myId && message.type !== 'system') {
         socket.emit('message:delivered', { roomId: message.roomId, messageId: message.id });
       }
     });
@@ -259,6 +299,9 @@ export function ChatProvider({ children }) {
     });
 
     socket.on('error', (data) => dispatch({ type: 'SET_ERROR', payload: data.message }));
+
+    socket.on('user:updated', (data) => dispatch({ type: 'USER_UPDATED', payload: data }));
+    socket.on('user:profileUpdated', (data) => dispatch({ type: 'USER_PROFILE_UPDATED', payload: data }));
 
     return socket;
   }, []);
@@ -359,6 +402,18 @@ export function ChatProvider({ children }) {
     dispatch({ type: 'LOGOUT' });
   }, []);
 
+  const updateProfile = useCallback((updates) => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    socket.emit('user:update', updates);
+  }, []);
+
+  const uploadAvatar = useCallback((imageBase64) => {
+    const socket = socketRef.current;
+    if (!socket) return;
+    socket.emit('avatar:upload', { image: imageBase64 });
+  }, []);
+
   return (
     <ChatContext.Provider
       value={{
@@ -374,6 +429,8 @@ export function ChatProvider({ children }) {
         createGroup,
         setActiveRoom,
         logout,
+        updateProfile,
+        uploadAvatar,
         getSocket: () => socketRef.current,
       }}
     >

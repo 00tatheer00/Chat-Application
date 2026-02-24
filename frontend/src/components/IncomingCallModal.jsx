@@ -14,7 +14,7 @@ export default function IncomingCallModal() {
     <div className="call-overlay incoming-call">
       <div className="call-modal">
         <div className="call-modal-avatar">
-          <Avatar name={fromUser?.username} color={fromUser?.color} size="xl" />
+          <Avatar name={fromUser?.username} color={fromUser?.color} size="xl" src={fromUser?.avatarUrl} />
         </div>
         <h2 className="call-modal-name">{fromUser?.username}</h2>
         <p className="call-modal-type">{isVideo ? 'Video call' : 'Voice call'}</p>

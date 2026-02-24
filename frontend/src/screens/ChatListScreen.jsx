@@ -7,6 +7,7 @@ import {
 import Avatar from '../components/Avatar';
 import ConversationItem from '../components/ConversationItem';
 import NewChatModal from '../components/NewChatModal';
+import SettingsModal from '../components/SettingsModal';
 import { useChat } from '../context/ChatContext';
 import { sortedRooms, getRoomDisplayName, getRoomColor, getDMPartnerId } from '../utils/helpers';
 
@@ -22,6 +23,7 @@ export default function ChatListScreen() {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('All');
   const [showNewChat, setShowNewChat] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
 
   const totalUnread = Object.values(unreadCounts).reduce((a, b) => a + b, 0);
@@ -57,6 +59,7 @@ export default function ChatListScreen() {
                 size="md"
                 showOnline
                 isOnline
+                src={currentUser?.avatarUrl}
               />
               <div className="chat-list-profile-info">
                 <h1 className="chat-list-title">{currentUser?.username}</h1>
@@ -80,7 +83,7 @@ export default function ChatListScreen() {
               <button
                 className="icon-btn tooltip"
                 data-tooltip="Settings"
-                onClick={() => {}}
+                onClick={() => setShowSettings(true)}
               >
                 <Settings size={22} />
               </button>
@@ -139,7 +142,7 @@ export default function ChatListScreen() {
                   onClick={() => openDM(u.id)}
                   title={`Start chat with ${u.username}`}
                 >
-                  <Avatar name={u.username} color={u.color} size="md" showOnline isOnline />
+                  <Avatar name={u.username} color={u.color} size="md" showOnline isOnline src={u.avatarUrl} />
                   <span className="online-user-name">{u.username.split(' ')[0]}</span>
                 </div>
               ))}
@@ -195,6 +198,7 @@ export default function ChatListScreen() {
       </div>
 
       {showNewChat && <NewChatModal onClose={() => setShowNewChat(false)} />}
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
     </>
   );
 }

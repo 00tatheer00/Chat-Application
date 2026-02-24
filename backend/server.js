@@ -1,4 +1,5 @@
 const path = require('path');
+const fs = require('fs');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
 const http = require('http');
@@ -6,6 +7,12 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 const emailjs = require('@emailjs/nodejs');
+
+const { connectDB } = require('./db/connect');
+const User = require('./models/User');
+const Room = require('./models/Room');
+const Message = require('./models/Message');
+const Otp = require('./models/Otp');
 
 const app = express();
 const server = http.createServer(app);
@@ -20,66 +27,59 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 
-// ─── In-memory store ───────────────────────────────────────────────────────────
-const users = new Map();          // socketId → user object
-const usersByUsername = new Map(); // username  → socketId
-const rooms = new Map();          // roomId    → room object
-const directRoomKeys = new Map(); // "id1_id2" → roomId
-const registeredUsers = new Map(); // email → { email, username, color }
-const otpStore = new Map();       // email → { otp, expiresAt, username? }
+// Serve uploaded avatars
+const uploadsDir = path.join(__dirname, 'uploads', 'avatars');
+fs.mkdirSync(uploadsDir, { recursive: true });
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// ─── Seed: General room ────────────────────────────────────────────────────────
+// ─── Runtime: socket ↔ user mapping ───────────────────────────────────────────
+const socketIdToUserId = new Map();
+const userIdToSocketId = new Map();
+const otpStore = new Map(); // in-memory fallback for OTP (MongoDB Otp also used)
+
 const GENERAL_ID = 'general';
-rooms.set(GENERAL_ID, {
-  id: GENERAL_ID,
-  name: 'General',
-  description: 'Welcome to TatheerApp!',
-  type: 'group',
-  members: [],
-  messages: [],
-  createdAt: new Date(),
-  lastActivity: new Date(),
-  lastMessage: null,
-  createdBy: 'system',
-  icon: '💬',
-});
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
-function getPublicUser(user) {
+function toPublicUser(user) {
+  if (!user) return null;
+  const id = user._id?.toString?.() || user.id;
   return {
-    id: user.id,
+    id,
     username: user.username,
-    color: user.color,
-    status: user.status,
+    color: user.color || '#00a884',
+    status: user.status || 'offline',
     lastSeen: user.lastSeen,
     bio: user.bio || '',
+    avatarUrl: user.avatarUrl || null,
   };
 }
 
-function getOnlineUsers() {
-  return Array.from(users.values()).map(getPublicUser);
+async function getOnlineUsers() {
+  const userIds = Array.from(userIdToSocketId.keys());
+  const users = await User.find({ _id: { $in: userIds } }).lean();
+  return users.map(toPublicUser);
 }
 
-function getRoomsForUser(socketId) {
-  const user = users.get(socketId);
-  if (!user) return [];
-  return user.rooms
-    .map((roomId) => {
-      const room = rooms.get(roomId);
-      if (!room) return null;
-      return { ...room, messages: room.messages.slice(-60) };
-    })
-    .filter(Boolean);
+async function getRoomsForUser(userId) {
+  const rooms = await Room.find({ members: userId }).sort({ lastActivity: -1 }).lean();
+  const result = [];
+  for (const room of rooms) {
+    const messages = await Message.find({ roomId: room._id }).sort({ createdAt: -1 }).limit(60).lean();
+    const roomObj = {
+      ...room,
+      id: room._id,
+      lastMessage: room.lastMessage ? await Message.findById(room.lastMessage).lean() : null,
+      messages: messages.reverse(),
+    };
+    if (roomObj.lastMessage) roomObj.lastMessage.id = roomObj.lastMessage._id?.toString();
+    roomObj.messages = roomObj.messages.map((m) => ({ ...m, id: m._id?.toString() }));
+    result.push(roomObj);
+  }
+  return result;
 }
 
-function broadcastRoomUpdate(roomId) {
-  const room = rooms.get(roomId);
-  if (!room) return;
-  io.to(roomId).emit('room:updated', {
-    roomId,
-    lastMessage: room.lastMessage,
-    lastActivity: room.lastActivity,
-  });
+function broadcastRoomUpdate(roomId, lastMessage, lastActivity) {
+  io.to(roomId).emit('room:updated', { roomId, lastMessage, lastActivity });
 }
 
 function generateOTP() {
@@ -92,16 +92,10 @@ async function sendOTPEmail(email, otp, userName) {
   const publicKey = process.env.EMAILJS_PUBLIC_KEY;
   const privateKey = process.env.EMAILJS_PRIVATE_KEY;
   if (!serviceId || !templateId || !publicKey || !privateKey) {
-    console.warn('EmailJS not configured. Missing:', {
-      serviceId: !!serviceId,
-      templateId: !!templateId,
-      publicKey: !!publicKey,
-      privateKey: !!privateKey,
-    });
+    console.warn('EmailJS not configured.');
     return false;
   }
   try {
-    // Template vars: {{to_email}}, {{user_name}}, {{otp_code}}
     await emailjs.send(serviceId, templateId, {
       to_email: email,
       reply_to: email,
@@ -110,23 +104,32 @@ async function sendOTPEmail(email, otp, userName) {
       otp_code: otp,
       code: otp,
       verification_code: otp,
-    }, {
-      publicKey,
-      privateKey,
-    });
+    }, { publicKey, privateKey });
     return true;
   } catch (err) {
     console.error('EmailJS send failed:', err?.message || err);
-    if (err?.text) console.error('EmailJS response:', err.text);
-    // Common fix: enable "Allow API requests" at https://dashboard.emailjs.com/admin/account/security
-    if (String(err?.message || '').toLowerCase().includes('forbidden') || err?.status === 403) {
-      console.error('Tip: Enable "Allow API requests" in EmailJS Account > Security for Node.js apps.');
-    }
     return false;
   }
 }
 
-// ─── Auth API (email + OTP) ────────────────────────────────────────────────────
+async function ensureGeneralRoom() {
+  let room = await Room.findById(GENERAL_ID);
+  if (!room) {
+    room = await Room.create({
+      _id: GENERAL_ID,
+      name: 'General',
+      description: 'Welcome to TatheerApp!',
+      type: 'group',
+      members: [],
+      createdBy: 'system',
+      icon: '💬',
+    });
+    console.log('Created General room');
+  }
+  return room;
+}
+
+// ─── Auth API ──────────────────────────────────────────────────────────────────
 app.post('/api/auth/request-otp', async (req, res) => {
   const { email, username, color } = req.body;
   const trimmedEmail = email?.trim()?.toLowerCase();
@@ -139,34 +142,37 @@ app.post('/api/auth/request-otp', async (req, res) => {
     if (!trimmedUsername || trimmedUsername.length < 2) {
       return res.status(400).json({ error: 'Username must be at least 2 characters.' });
     }
-    if (registeredUsers.has(trimmedEmail)) {
+    const existing = await User.findOne({ email: trimmedEmail });
+    if (existing) {
       return res.status(400).json({ error: 'Email already registered. Use Login instead.' });
     }
-    const usernameTaken = usersByUsername.has(trimmedUsername) ||
-      Array.from(registeredUsers.values()).some((u) => u.username === trimmedUsername);
+    const usernameTaken = await User.findOne({ username: trimmedUsername });
     if (usernameTaken) {
       return res.status(400).json({ error: 'Username is taken. Choose another.' });
     }
   } else {
-    if (!registeredUsers.has(trimmedEmail)) {
+    const existing = await User.findOne({ email: trimmedEmail });
+    if (!existing) {
       return res.status(400).json({ error: 'Email not registered. Create an account first.' });
     }
   }
   const otp = generateOTP();
-  otpStore.set(trimmedEmail, {
+  await Otp.deleteMany({ email: trimmedEmail });
+  await Otp.create({
+    email: trimmedEmail,
     otp,
-    expiresAt: Date.now() + 10 * 60 * 1000,
-    username: trimmedUsername || registeredUsers.get(trimmedEmail)?.username,
+    expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+    username: trimmedUsername || (await User.findOne({ email: trimmedEmail }))?.username,
     color: color || '#00a884',
   });
-  const userName = trimmedUsername || registeredUsers.get(trimmedEmail)?.username || 'User';
+  const userName = trimmedUsername || (await User.findOne({ email: trimmedEmail }))?.username || 'User';
   const sent = await sendOTPEmail(trimmedEmail, otp, userName);
   if (!sent) {
     if (process.env.NODE_ENV === 'development' && process.env.DEV_OTP === 'true') {
       console.log(`[DEV] OTP for ${trimmedEmail}: ${otp}`);
       res.json({ success: true, message: 'OTP sent (dev mode - check server console)' });
     } else {
-      otpStore.delete(trimmedEmail);
+      await Otp.deleteOne({ email: trimmedEmail });
       return res.status(500).json({ error: 'Failed to send OTP. Configure EmailJS or set DEV_OTP=true for dev.' });
     }
   } else {
@@ -174,32 +180,31 @@ app.post('/api/auth/request-otp', async (req, res) => {
   }
 });
 
-app.post('/api/auth/verify-otp', (req, res) => {
+app.post('/api/auth/verify-otp', async (req, res) => {
   const { email, otp } = req.body;
   const trimmedEmail = email?.trim()?.toLowerCase();
   if (!trimmedEmail || !otp) {
     return res.status(400).json({ error: 'Email and OTP are required.' });
   }
-  const stored = otpStore.get(trimmedEmail);
+  const stored = await Otp.findOne({ email: trimmedEmail });
   if (!stored) {
     return res.status(400).json({ error: 'OTP expired or invalid. Request a new one.' });
   }
-  if (Date.now() > stored.expiresAt) {
-    otpStore.delete(trimmedEmail);
+  if (Date.now() > new Date(stored.expiresAt).getTime()) {
+    await Otp.deleteOne({ email: trimmedEmail });
     return res.status(400).json({ error: 'OTP expired. Request a new one.' });
   }
   if (stored.otp !== String(otp).trim()) {
     return res.status(400).json({ error: 'Invalid OTP.' });
   }
-  otpStore.delete(trimmedEmail);
-  let user = registeredUsers.get(trimmedEmail);
+  await Otp.deleteOne({ email: trimmedEmail });
+  let user = await User.findOne({ email: trimmedEmail });
   if (!user) {
-    user = {
-      email: trimmedEmail,
+    user = await User.create({
       username: stored.username,
+      email: trimmedEmail,
       color: stored.color || '#00a884',
-    };
-    registeredUsers.set(trimmedEmail, user);
+    });
   }
   res.json({ success: true, user: { email: user.email, username: user.username, color: user.color } });
 });
@@ -208,337 +213,438 @@ app.post('/api/auth/verify-otp', (req, res) => {
 io.on('connection', (socket) => {
   console.log('🔌 New connection:', socket.id);
 
-  // ── JOIN ──────────────────────────────────────────────────────────────────
-  socket.on('user:join', ({ username, color, bio }) => {
+  socket.on('user:join', async ({ username, color, bio }) => {
     const trimmed = username?.trim();
     if (!trimmed || trimmed.length < 2) {
       socket.emit('error', { message: 'Username must be at least 2 characters.' });
       return;
     }
 
-    if (usersByUsername.has(trimmed)) {
+    const existingUser = await User.findOne({ username: trimmed });
+    if (existingUser && userIdToSocketId.has(existingUser._id.toString())) {
       socket.emit('error', { message: 'Username is already taken. Choose another.' });
       return;
     }
 
-    const user = {
-      id: socket.id,
-      username: trimmed,
-      color: color || '#00a884',
-      bio: bio || '',
-      socketId: socket.id,
-      rooms: [GENERAL_ID],
-      status: 'online',
-      lastSeen: null,
-      joinedAt: new Date(),
-    };
+    let user = await User.findOne({ username: trimmed });
+    if (!user) {
+      user = await User.create({
+        username: trimmed,
+        color: color || '#00a884',
+        bio: bio || '',
+      });
+    } else {
+      if (bio !== undefined) user.bio = String(bio || '').slice(0, 150);
+      if (color) user.color = color;
+      await user.save();
+    }
 
-    users.set(socket.id, user);
-    usersByUsername.set(trimmed, socket.id);
+    const userId = user._id.toString();
+    socketIdToUserId.set(socket.id, userId);
+    userIdToSocketId.set(userId, socket.id);
 
-    socket.join(GENERAL_ID);
-    const genRoom = rooms.get(GENERAL_ID);
-    if (!genRoom.members.includes(socket.id)) genRoom.members.push(socket.id);
+    const generalRoom = await Room.findById(GENERAL_ID);
+    if (!generalRoom.members.includes(userId)) {
+      generalRoom.members.push(userId);
+      const mNames = generalRoom.memberNames || new Map();
+      const mColors = generalRoom.memberColors || new Map();
+      mNames.set(userId, user.username);
+      mColors.set(userId, user.color);
+      generalRoom.memberNames = mNames;
+      generalRoom.memberColors = mColors;
+      generalRoom.markModified('memberNames');
+      generalRoom.markModified('memberColors');
+      await generalRoom.save();
+    }
 
-    // ── system message ──
-    const sysMsg = {
-      id: uuidv4(),
+    const userRooms = await Room.find({ members: userId });
+    for (const r of userRooms) {
+      socket.join(r._id);
+    }
+
+    const sysMsg = await Message.create({
       roomId: GENERAL_ID,
       senderId: 'system',
       senderName: 'System',
       senderColor: '#8696a0',
       content: `${trimmed} joined the chat 👋`,
       type: 'system',
-      replyTo: null,
-      reactions: {},
-      readBy: [],
-      createdAt: new Date(),
-    };
-    genRoom.messages.push(sysMsg);
-    genRoom.lastMessage = sysMsg;
-    genRoom.lastActivity = new Date();
-    io.to(GENERAL_ID).emit('message:new', sysMsg);
+    });
+    const sysMsgObj = { ...sysMsg.toObject(), id: sysMsg._id.toString() };
+    generalRoom.lastMessage = sysMsg._id.toString();
+    generalRoom.lastActivity = new Date();
+    await generalRoom.save();
+
+    io.to(GENERAL_ID).emit('message:new', sysMsgObj);
+
+    const roomsForUser = await getRoomsForUser(userId);
+    const onlineUsers = await getOnlineUsers();
 
     socket.emit('user:joined', {
-      user,
-      rooms: getRoomsForUser(socket.id),
-      onlineUsers: getOnlineUsers(),
+      user: toPublicUser({ ...user.toObject(), id: userId, status: 'online', rooms: userRooms.map((r) => r._id) }),
+      rooms: roomsForUser,
+      onlineUsers,
     });
 
     socket.broadcast.emit('user:online', {
-      user: getPublicUser(user),
-      onlineUsers: getOnlineUsers(),
+      user: toPublicUser(user),
+      onlineUsers,
     });
 
     console.log(`✅ ${trimmed} joined`);
   });
 
-  // ── SEND MESSAGE ──────────────────────────────────────────────────────────
-  socket.on('message:send', ({ roomId, content, replyTo, type = 'text' }) => {
-    const user = users.get(socket.id);
-    const room = rooms.get(roomId);
-    if (!user || !room) return;
+  socket.on('user:update', async ({ username, color, bio }) => {
+    const userId = socketIdToUserId.get(socket.id);
+    if (!userId) return;
+    const user = await User.findById(userId);
+    if (!user) return;
+
+    const updates = {};
+    if (username !== undefined) {
+      const trimmed = String(username || '').trim();
+      if (trimmed.length < 2) {
+        socket.emit('error', { message: 'Username must be at least 2 characters.' });
+        return;
+      }
+      if (trimmed !== user.username) {
+        const taken = await User.findOne({ username: trimmed });
+        if (taken && taken._id.toString() !== userId) {
+          socket.emit('error', { message: 'Username is already taken.' });
+          return;
+        }
+        user.username = trimmed;
+        updates.username = trimmed;
+        await Room.updateMany(
+          { members: userId },
+          { $set: { [`memberNames.${userId}`]: trimmed, [`memberColors.${userId}`]: user.color } }
+        );
+      }
+    }
+    if (color !== undefined && /^#[0-9a-fA-F]{6}$/.test(color)) {
+      user.color = color;
+      updates.color = color;
+      await Room.updateMany({ members: userId }, { $set: { [`memberColors.${userId}`]: color } });
+    }
+    if (bio !== undefined) {
+      user.bio = String(bio || '').slice(0, 150);
+      updates.bio = user.bio;
+    }
+    await user.save();
+
+    socket.emit('user:updated', { user: toPublicUser(user), updates });
+    socket.broadcast.emit('user:profileUpdated', { userId, user: toPublicUser(user) });
+  });
+
+  socket.on('avatar:upload', async ({ image }) => {
+    const userId = socketIdToUserId.get(socket.id);
+    if (!userId) return;
+    const user = await User.findById(userId);
+    if (!user || !image || typeof image !== 'string') return;
+
+    const matches = image.match(/^data:image\/(\w+);base64,(.+)$/);
+    if (!matches) {
+      socket.emit('error', { message: 'Invalid image format.' });
+      return;
+    }
+    if (!['jpeg', 'jpg', 'png', 'gif', 'webp'].includes(matches[1].toLowerCase())) {
+      socket.emit('error', { message: 'Only JPEG, PNG, GIF, and WebP are allowed.' });
+      return;
+    }
+    const sizeBytes = (matches[2].length * 3) / 4;
+    if (sizeBytes > 2 * 1024 * 1024) {
+      socket.emit('error', { message: 'Image too large (max 2MB).' });
+      return;
+    }
+
+    const ext = matches[1] === 'jpeg' ? 'jpg' : matches[1];
+    const safeName = user.username.replace(/[^a-z0-9]/gi, '_').slice(0, 30);
+    const filename = `avatar-${safeName}-${Date.now()}.${ext}`;
+    const filepath = path.join(uploadsDir, filename);
+    try {
+      fs.writeFileSync(filepath, Buffer.from(matches[2], 'base64'));
+    } catch (err) {
+      socket.emit('error', { message: 'Failed to save image.' });
+      return;
+    }
+    const avatarUrl = `/uploads/avatars/${filename}`;
+    user.avatarUrl = avatarUrl;
+    await user.save();
+
+    socket.emit('user:updated', { user: toPublicUser(user), updates: { avatarUrl } });
+    socket.broadcast.emit('user:profileUpdated', { userId, user: toPublicUser(user) });
+  });
+
+  socket.on('message:send', async ({ roomId, content, replyTo, type = 'text' }) => {
+    const userId = socketIdToUserId.get(socket.id);
+    if (!userId) return;
+    const user = await User.findById(userId);
+    const room = await Room.findById(roomId);
+    if (!user || !room || !room.members.includes(userId)) return;
     if (!content?.trim()) return;
 
-    const message = {
-      id: uuidv4(),
+    const msg = await Message.create({
       roomId,
-      senderId: socket.id,
+      senderId: userId,
       senderName: user.username,
       senderColor: user.color,
       content: content.trim(),
       type,
       replyTo: replyTo || null,
-      reactions: {},
-      readBy: [socket.id],
-      deliveredTo: [socket.id],
-      createdAt: new Date(),
-      edited: false,
-    };
-
-    room.messages.push(message);
-    room.lastMessage = message;
+      readBy: [userId],
+      deliveredTo: [userId],
+    });
+    const msgObj = { ...msg.toObject(), id: msg._id.toString() };
+    room.lastMessage = msg._id.toString();
     room.lastActivity = new Date();
+    await room.save();
 
-    io.to(roomId).emit('message:new', message);
-    broadcastRoomUpdate(roomId);
+    io.to(roomId).emit('message:new', msgObj);
+    broadcastRoomUpdate(roomId, msgObj, room.lastActivity);
   });
 
-  // ── EDIT MESSAGE ──────────────────────────────────────────────────────────
-  socket.on('message:edit', ({ roomId, messageId, newContent }) => {
-    const room = rooms.get(roomId);
-    if (!room) return;
-    const msg = room.messages.find((m) => m.id === messageId);
-    if (!msg || msg.senderId !== socket.id) return;
+  socket.on('message:edit', async ({ roomId, messageId, newContent }) => {
+    const userId = socketIdToUserId.get(socket.id);
+    if (!userId) return;
+    const msg = await Message.findOne({ _id: messageId, roomId });
+    if (!msg || msg.senderId !== userId) return;
     msg.content = newContent.trim();
     msg.edited = true;
     msg.editedAt = new Date();
+    await msg.save();
     io.to(roomId).emit('message:edited', { messageId, content: msg.content, editedAt: msg.editedAt });
   });
 
-  // ── DELETE MESSAGE ────────────────────────────────────────────────────────
-  socket.on('message:delete', ({ roomId, messageId }) => {
-    const room = rooms.get(roomId);
-    if (!room) return;
-    const idx = room.messages.findIndex((m) => m.id === messageId && m.senderId === socket.id);
-    if (idx === -1) return;
-    room.messages[idx] = { ...room.messages[idx], content: 'This message was deleted', deleted: true };
+  socket.on('message:delete', async ({ roomId, messageId }) => {
+    const userId = socketIdToUserId.get(socket.id);
+    if (!userId) return;
+    const msg = await Message.findOne({ _id: messageId, roomId });
+    if (!msg || msg.senderId !== userId) return;
+    msg.content = 'This message was deleted';
+    msg.deleted = true;
+    await msg.save();
     io.to(roomId).emit('message:deleted', { messageId });
   });
 
-  // ── REACT TO MESSAGE ──────────────────────────────────────────────────────
-  socket.on('message:react', ({ messageId, roomId, emoji }) => {
-    const room = rooms.get(roomId);
-    if (!room) return;
-    const msg = room.messages.find((m) => m.id === messageId);
-    if (!msg) return;
+  socket.on('message:react', async ({ messageId, roomId, emoji }) => {
+    const userId = socketIdToUserId.get(socket.id);
+    if (!userId) return;
+    const msg = await Message.findById(messageId);
+    if (!msg || msg.roomId !== roomId) return;
 
-    if (!msg.reactions[emoji]) msg.reactions[emoji] = [];
-    const idx = msg.reactions[emoji].indexOf(socket.id);
+    const reactions = msg.reactions instanceof Map ? msg.reactions : new Map(Object.entries(msg.reactions || {}));
+    const arr = reactions.get(emoji) || [];
+    const idx = arr.indexOf(userId);
     if (idx > -1) {
-      msg.reactions[emoji].splice(idx, 1);
-      if (msg.reactions[emoji].length === 0) delete msg.reactions[emoji];
+      arr.splice(idx, 1);
+      if (arr.length === 0) reactions.delete(emoji);
     } else {
-      msg.reactions[emoji].push(socket.id);
+      arr.push(userId);
+      reactions.set(emoji, arr);
     }
+    msg.reactions = reactions;
+    await msg.save();
 
-    io.to(roomId).emit('message:reacted', { messageId, reactions: msg.reactions });
+    const reactionsObj = {};
+    reactions.forEach((v, k) => { reactionsObj[k] = v; });
+    io.to(roomId).emit('message:reacted', { messageId, reactions: reactionsObj });
   });
 
-  // ── TYPING ────────────────────────────────────────────────────────────────
-  socket.on('typing:start', ({ roomId }) => {
-    const user = users.get(socket.id);
+  socket.on('typing:start', async ({ roomId }) => {
+    const userId = socketIdToUserId.get(socket.id);
+    if (!userId) return;
+    const user = await User.findById(userId);
     if (!user) return;
-    socket.to(roomId).emit('typing:start', { userId: socket.id, username: user.username, roomId });
+    socket.to(roomId).emit('typing:start', { userId, username: user.username, roomId });
   });
 
   socket.on('typing:stop', ({ roomId }) => {
-    socket.to(roomId).emit('typing:stop', { userId: socket.id, roomId });
+    const userId = socketIdToUserId.get(socket.id);
+    if (userId) socket.to(roomId).emit('typing:stop', { userId, roomId });
   });
 
-  // ── DIRECT MESSAGE ────────────────────────────────────────────────────────
-  socket.on('dm:create', ({ targetUserId }) => {
-    const user = users.get(socket.id);
-    const targetUser = users.get(targetUserId);
+  socket.on('dm:create', async ({ targetUserId }) => {
+    const userId = socketIdToUserId.get(socket.id);
+    if (!userId) return;
+    const user = await User.findById(userId);
+    const targetUser = await User.findById(targetUserId);
     if (!user || !targetUser) return;
 
-    const dmKey = [socket.id, targetUserId].sort().join('_');
-
-    let roomId = directRoomKeys.get(dmKey);
-    if (!roomId) {
-      roomId = uuidv4();
-      directRoomKeys.set(dmKey, roomId);
-
-      const room = {
-        id: roomId,
+    const dmKey = [userId, targetUserId].sort().join('_');
+    let room = await Room.findOne({ directKey: dmKey });
+    if (!room) {
+      room = await Room.create({
+        _id: uuidv4(),
         name: `${user.username} & ${targetUser.username}`,
         type: 'direct',
-        members: [socket.id, targetUserId],
-        memberNames: { [socket.id]: user.username, [targetUserId]: targetUser.username },
-        memberColors: { [socket.id]: user.color, [targetUserId]: targetUser.color },
-        messages: [],
-        createdAt: new Date(),
-        lastActivity: new Date(),
-        lastMessage: null,
-      };
-      rooms.set(roomId, room);
+        members: [userId, targetUserId],
+        memberNames: { [userId]: user.username, [targetUserId]: targetUser.username },
+        memberColors: { [userId]: user.color, [targetUserId]: targetUser.color },
+        directKey: dmKey,
+      });
+      const targetSocketId = userIdToSocketId.get(targetUserId);
+      if (targetSocketId) io.sockets.sockets.get(targetSocketId)?.join(room._id);
+      socket.join(room._id);
 
-      user.rooms.push(roomId);
-      targetUser.rooms.push(roomId);
-
-      socket.join(roomId);
-      const targetSocket = io.sockets.sockets.get(targetUserId);
-      if (targetSocket) targetSocket.join(roomId);
-
-      const roomData = { ...room, messages: [] };
+      const roomObj = room.toObject();
+    const roomData = {
+      ...roomObj,
+      id: room._id,
+      memberNames: room.memberNames instanceof Map ? Object.fromEntries(room.memberNames) : (room.memberNames || {}),
+      memberColors: room.memberColors instanceof Map ? Object.fromEntries(room.memberColors) : (room.memberColors || {}),
+      messages: [],
+    };
       socket.emit('dm:created', { room: roomData, messages: [] });
-      if (targetSocket) targetSocket.emit('dm:invited', { room: roomData, messages: [] });
+      if (targetSocketId) io.sockets.sockets.get(targetSocketId)?.emit('dm:invited', { room: roomData, messages: [] });
     } else {
-      const room = rooms.get(roomId);
-      socket.emit('dm:created', { room, messages: room.messages.slice(-60) });
+      socket.join(room._id);
+      const messages = await Message.find({ roomId: room._id }).sort({ createdAt: -1 }).limit(60).lean();
+      const roomObj = room.toObject();
+      const roomData = {
+        ...roomObj,
+        id: room._id,
+        memberNames: room.memberNames instanceof Map ? Object.fromEntries(room.memberNames) : (room.memberNames || {}),
+        memberColors: room.memberColors instanceof Map ? Object.fromEntries(room.memberColors) : (room.memberColors || {}),
+      };
+      const msgs = messages.reverse().map((m) => ({ ...m, id: m._id?.toString() }));
+      socket.emit('dm:created', { room: roomData, messages: msgs });
     }
   });
 
-  // ── CREATE GROUP ──────────────────────────────────────────────────────────
-  socket.on('room:create', ({ name, memberIds, icon }) => {
-    const user = users.get(socket.id);
+  socket.on('room:create', async ({ name, memberIds, icon }) => {
+    const userId = socketIdToUserId.get(socket.id);
+    if (!userId) return;
+    const user = await User.findById(userId);
     if (!user || !name?.trim()) return;
 
+    const validMembers = await User.find({ _id: { $in: memberIds } });
+    const allMemberIds = [userId, ...validMembers.map((m) => m._id.toString())];
     const roomId = uuidv4();
-    const allMembers = [socket.id, ...memberIds.filter((id) => users.has(id))];
 
-    const room = {
-      id: roomId,
+    const room = await Room.create({
+      _id: roomId,
       name: name.trim(),
-      description: '',
       type: 'group',
       icon: icon || '👥',
-      members: allMembers,
-      messages: [],
-      createdAt: new Date(),
-      lastActivity: new Date(),
-      lastMessage: null,
-      createdBy: socket.id,
-    };
+      members: allMemberIds,
+      createdBy: userId,
+    });
 
-    rooms.set(roomId, room);
+    for (const mid of allMemberIds) {
+      const sockId = userIdToSocketId.get(mid);
+      if (sockId) {
+        io.sockets.sockets.get(sockId)?.join(roomId);
+        io.sockets.sockets.get(sockId)?.emit('room:created', { room: { ...room.toObject(), id: roomId } });
+      }
+    }
+  });
 
-    allMembers.forEach((memberId) => {
-      const member = users.get(memberId);
-      if (!member) return;
-      if (!member.rooms.includes(roomId)) member.rooms.push(roomId);
-      const memberSocket = io.sockets.sockets.get(memberId);
-      if (memberSocket) {
-        memberSocket.join(roomId);
-        memberSocket.emit('room:created', { room });
+  socket.on('message:delivered', async ({ roomId, messageId }) => {
+    const userId = socketIdToUserId.get(socket.id);
+    if (!userId) return;
+    const msg = await Message.findById(messageId);
+    if (!msg || msg.roomId !== roomId) return;
+    if (!msg.deliveredTo.includes(userId)) {
+      msg.deliveredTo.push(userId);
+      await msg.save();
+    }
+    const senderSocketId = userIdToSocketId.get(msg.senderId);
+    if (senderSocketId) {
+      io.sockets.sockets.get(senderSocketId)?.emit('message:delivered', { roomId, messageId, userId });
+    }
+  });
+
+  socket.on('messages:read', async ({ roomId }) => {
+    const userId = socketIdToUserId.get(socket.id);
+    if (!userId) return;
+    await Message.updateMany({ roomId }, { $addToSet: { readBy: userId } });
+    io.to(roomId).emit('messages:read', { roomId, userId });
+  });
+
+  socket.on('call:start', ({ targetUserId, type }) => {
+    const userId = socketIdToUserId.get(socket.id);
+    if (!userId) return;
+    User.findById(userId).then((caller) => {
+      const targetSocketId = userIdToSocketId.get(targetUserId);
+      if (caller && targetSocketId) {
+        io.sockets.sockets.get(targetSocketId)?.emit('call:incoming', {
+          fromUserId: userId,
+          fromUser: toPublicUser(caller),
+          type: type || 'video',
+        });
       }
     });
   });
 
-  // ── DELIVERY RECEIPTS (recipient online, received message) ─────────────────
-  socket.on('message:delivered', ({ roomId, messageId }) => {
-    const room = rooms.get(roomId);
-    if (!room) return;
-    const msg = room.messages.find((m) => m.id === messageId);
-    if (!msg) return;
-    if (!msg.deliveredTo) msg.deliveredTo = [];
-    if (!msg.deliveredTo.includes(socket.id)) msg.deliveredTo.push(socket.id);
-    // Notify the sender
-    const senderSocket = io.sockets.sockets.get(msg.senderId);
-    if (senderSocket) {
-      senderSocket.emit('message:delivered', { roomId, messageId, userId: socket.id });
-    }
-  });
-
-  // ── READ RECEIPTS ─────────────────────────────────────────────────────────
-  socket.on('messages:read', ({ roomId }) => {
-    const room = rooms.get(roomId);
-    if (!room) return;
-    room.messages.forEach((msg) => {
-      if (!msg.readBy) msg.readBy = [];
-      if (!msg.readBy.includes(socket.id)) msg.readBy.push(socket.id);
-    });
-    // Broadcast to entire room so message senders get the read receipt update
-    io.to(roomId).emit('messages:read', { roomId, userId: socket.id });
-  });
-
-  // ── VOICE / VIDEO CALLS ────────────────────────────────────────────────────
-  socket.on('call:start', ({ targetUserId, type }) => {
-    const caller = users.get(socket.id);
-    const targetSocket = io.sockets.sockets.get(targetUserId);
-    if (!caller || !targetSocket) return;
-    targetSocket.emit('call:incoming', {
-      fromUserId: socket.id,
-      fromUser: getPublicUser(caller),
-      type: type || 'video',
-    });
-  });
-
   socket.on('call:offer', ({ targetUserId, offer }) => {
-    const targetSocket = io.sockets.sockets.get(targetUserId);
-    if (targetSocket) targetSocket.emit('call:offer', { fromUserId: socket.id, offer });
+    const targetSocketId = userIdToSocketId.get(targetUserId);
+    if (targetSocketId) io.sockets.sockets.get(targetSocketId)?.emit('call:offer', { fromUserId: socketIdToUserId.get(socket.id), offer });
   });
 
   socket.on('call:answer', ({ targetUserId, answer }) => {
-    const targetSocket = io.sockets.sockets.get(targetUserId);
-    if (targetSocket) targetSocket.emit('call:answer', { fromUserId: socket.id, answer });
+    const targetSocketId = userIdToSocketId.get(targetUserId);
+    if (targetSocketId) io.sockets.sockets.get(targetSocketId)?.emit('call:answer', { fromUserId: socketIdToUserId.get(socket.id), answer });
   });
 
   socket.on('call:ice-candidate', ({ targetUserId, candidate }) => {
-    const targetSocket = io.sockets.sockets.get(targetUserId);
-    if (targetSocket) targetSocket.emit('call:ice-candidate', { fromUserId: socket.id, candidate });
+    const targetSocketId = userIdToSocketId.get(targetUserId);
+    if (targetSocketId) io.sockets.sockets.get(targetSocketId)?.emit('call:ice-candidate', { fromUserId: socketIdToUserId.get(socket.id), candidate });
   });
 
   socket.on('call:reject', ({ fromUserId }) => {
-    const targetSocket = io.sockets.sockets.get(fromUserId);
-    if (targetSocket) targetSocket.emit('call:rejected', { byUserId: socket.id });
+    const targetSocketId = userIdToSocketId.get(fromUserId);
+    if (targetSocketId) io.sockets.sockets.get(targetSocketId)?.emit('call:rejected', { byUserId: socketIdToUserId.get(socket.id) });
   });
 
   socket.on('call:end', ({ targetUserId }) => {
-    const targetSocket = io.sockets.sockets.get(targetUserId);
-    if (targetSocket) targetSocket.emit('call:ended', { byUserId: socket.id });
+    const targetSocketId = userIdToSocketId.get(targetUserId);
+    if (targetSocketId) io.sockets.sockets.get(targetSocketId)?.emit('call:ended', { byUserId: socketIdToUserId.get(socket.id) });
   });
 
-  // ── USER STATUS ───────────────────────────────────────────────────────────
   socket.on('user:status', ({ status }) => {
-    const user = users.get(socket.id);
-    if (!user) return;
-    user.status = status;
-    io.emit('user:statusChanged', { userId: socket.id, status });
+    const userId = socketIdToUserId.get(socket.id);
+    if (userId) io.emit('user:statusChanged', { userId, status });
   });
 
-  // ── DISCONNECT ────────────────────────────────────────────────────────────
-  socket.on('disconnect', () => {
-    const user = users.get(socket.id);
-    if (!user) return;
+  socket.on('disconnect', async () => {
+    const userId = socketIdToUserId.get(socket.id);
+    if (!userId) return;
 
-    user.status = 'offline';
-    user.lastSeen = new Date();
-    usersByUsername.delete(user.username);
-    users.delete(socket.id);
+    const user = await User.findById(userId);
+    if (user) {
+      user.lastSeen = new Date();
+      await user.save();
+    }
 
-    user.rooms.forEach((roomId) => {
-      const room = rooms.get(roomId);
-      if (room) room.members = room.members.filter((id) => id !== socket.id);
-    });
+    socketIdToUserId.delete(socket.id);
+    userIdToSocketId.delete(userId);
 
+    const onlineUsers = await getOnlineUsers();
     io.emit('user:offline', {
-      userId: socket.id,
-      username: user.username,
-      lastSeen: user.lastSeen,
-      onlineUsers: getOnlineUsers(),
+      userId,
+      username: user?.username,
+      lastSeen: user?.lastSeen,
+      onlineUsers,
     });
-
-    console.log(`👋 ${user.username} disconnected`);
+    console.log(`👋 ${user?.username} disconnected`);
   });
 });
 
-// ─── REST health check ─────────────────────────────────────────────────────────
-app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', onlineUsers: users.size, rooms: rooms.size });
+app.get('/api/health', async (_req, res) => {
+  res.json({ status: 'ok', onlineUsers: userIdToSocketId.size });
 });
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
-  console.log(`🚀 TatheerApp server running on http://localhost:${PORT}`);
+
+async function start() {
+  await connectDB();
+  await ensureGeneralRoom();
+  server.listen(PORT, () => {
+    console.log(`🚀 TatheerApp server running on http://localhost:${PORT}`);
+  });
+}
+
+start().catch((err) => {
+  console.error('Failed to start:', err);
+  process.exit(1);
 });

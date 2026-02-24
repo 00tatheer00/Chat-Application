@@ -1,6 +1,7 @@
 import { getInitials } from '../utils/helpers';
+import { API_URL } from '../config';
 
-export default function Avatar({ name, color, size = 'md', showOnline = false, isOnline = false }) {
+export default function Avatar({ name, color, size = 'md', showOnline = false, isOnline = false, src }) {
   const sizes = {
     xs: { wh: 28, fs: 11 },
     sm: { wh: 36, fs: 14 },
@@ -9,6 +10,8 @@ export default function Avatar({ name, color, size = 'md', showOnline = false, i
     xl: { wh: 72, fs: 28 },
   };
   const { wh, fs } = sizes[size] || sizes.md;
+
+  const imageUrl = src?.startsWith('/') ? `${API_URL}${src}` : src;
 
   return (
     <div style={{ position: 'relative', flexShrink: 0, width: wh, height: wh }}>
@@ -26,9 +29,18 @@ export default function Avatar({ name, color, size = 'md', showOnline = false, i
           color: '#fff',
           userSelect: 'none',
           letterSpacing: '0.5px',
+          overflow: 'hidden',
         }}
       >
-        {getInitials(name)}
+        {imageUrl ? (
+          <img
+            src={imageUrl}
+            alt={name || 'Avatar'}
+            style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+          />
+        ) : (
+          getInitials(name)
+        )}
       </div>
       {showOnline && (
         <div

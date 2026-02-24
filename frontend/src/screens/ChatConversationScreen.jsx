@@ -178,6 +178,7 @@ export default function ChatConversationScreen() {
                 size="sm"
                 showOnline={activeRoom.type === 'direct'}
                 isOnline={isPartnerOnline}
+                src={activeRoom.type === 'direct' ? partnerUser?.avatarUrl : null}
               />
             )}
             <div className="chat-header-text">

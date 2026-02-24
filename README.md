@@ -20,7 +20,7 @@ A full-featured, WhatsApp-like real-time chat application built with **React** (
 ## Tech Stack
 
 - **Frontend:** React 18, Vite, React Router, Socket.io Client, Lucide React
-- **Backend:** Express, Socket.io, UUID
+- **Backend:** Express, Socket.io, Mongoose, MongoDB Atlas
 
 ## Getting Started
 
@@ -49,12 +49,24 @@ cd frontend
 npm run dev
 ```
 
-### 3. Open in browser
+### 3. MongoDB Atlas (required)
+
+Add your connection string to `backend/.env`:
+
+1. Create a free cluster at [MongoDB Atlas](https://cloud.mongodb.com/)
+2. Get your connection string (Connect → Drivers → Node.js)
+3. Copy `backend/.env.example` to `backend/.env` and add:
+   ```
+   MONGODB_URI=mongodb+srv://youruser:yourpassword@cluster.xxxxx.mongodb.net/tatheerapp?retryWrites=true&w=majority
+   ```
+Replace `youruser`, `yourpassword`, and cluster URL with your actual credentials.
+
+### 4. Open in browser
 
 - Frontend: http://localhost:5173
 - Backend API: http://localhost:3001
 
-### 4. Email OTP (optional)
+### 5. Email OTP (optional)
 
 For email registration and login, set up [EmailJS](https://www.emailjs.com/):
 
@@ -63,7 +75,7 @@ For email registration and login, set up [EmailJS](https://www.emailjs.com/):
 3. Enable "Allow API requests" in Account → Security
 4. Copy `backend/.env.example` to `backend/.env` and add your keys
 
-### 5. Test with multiple users
+### 6. Test with multiple users
 
 Open multiple browser tabs (or incognito windows), enter different usernames, and chat in real time.
 
@@ -71,7 +83,9 @@ Open multiple browser tabs (or incognito windows), enter different usernames, an
 
 ```
 ├── backend/
-│   └── server.js          # Express + Socket.io server
+│   ├── server.js          # Express + Socket.io server
+│   ├── db/connect.js      # MongoDB connection
+│   └── models/            # User, Room, Message, Otp
 ├── frontend/
 │   └── src/
 │       ├── screens/       # ChatListScreen, ChatConversationScreen, LoginScreen

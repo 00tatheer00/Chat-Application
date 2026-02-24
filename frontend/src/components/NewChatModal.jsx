@@ -122,7 +122,7 @@ export default function NewChatModal({ onClose }) {
               <div className="selected-users-preview">
                 {selectedUsers.map((u) => (
                   <div key={u.id} className="selected-user-chip">
-                    <Avatar name={u.username} color={u.color} size="xs" />
+                    <Avatar name={u.username} color={u.color} size="xs" src={u.avatarUrl} />
                     <span style={{ fontSize: 12, color: 'var(--text-primary)' }}>{u.username}</span>
                     <button
                       style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: 0, lineHeight: 1 }}
@@ -155,7 +155,7 @@ export default function NewChatModal({ onClose }) {
                     tab === 'direct' ? handleDM(user.id) : toggleSelect(user)
                   }
                 >
-                  <Avatar name={user.username} color={user.color} size="sm" showOnline isOnline />
+                  <Avatar name={user.username} color={user.color} size="sm" showOnline isOnline src={user.avatarUrl} />
                   <div className="user-item-info">
                     <div className="user-item-name">{user.username}</div>
                     <div className="user-item-status">● Online</div>

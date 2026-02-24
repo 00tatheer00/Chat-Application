@@ -47,6 +47,7 @@ export default function ConversationItem({ room, isActive, onClick, showChevron 
             size="md"
             showOnline={room.type === 'direct'}
             isOnline={partnerOnline}
+            src={room.type === 'direct' ? onlineUsers.find((u) => u.id === partnerId)?.avatarUrl : null}
           />
         )}
       </div>

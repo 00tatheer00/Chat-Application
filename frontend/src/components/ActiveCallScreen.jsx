@@ -60,6 +60,7 @@ export default function ActiveCallScreen() {
                 name={partner?.username}
                 color={partner?.color}
                 size="xl"
+                src={partner?.avatarUrl}
               />
               <span className="call-placeholder-name">{partner?.username}</span>
               <span className="call-placeholder-status">
