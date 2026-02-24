@@ -108,6 +108,9 @@ async function sendOTPEmail(email, otp, userName) {
     return true;
   } catch (err) {
     console.error('EmailJS send failed:', err?.message || err);
+    if (err?.status === 403 || String(err?.message || '').toLowerCase().includes('forbidden')) {
+      console.error('→ Enable "Allow API requests" in EmailJS: https://dashboard.emailjs.com/admin/account/security');
+    }
     return false;
   }
 }
@@ -168,12 +171,14 @@ app.post('/api/auth/request-otp', async (req, res) => {
   const userName = trimmedUsername || (await User.findOne({ email: trimmedEmail }))?.username || 'User';
   const sent = await sendOTPEmail(trimmedEmail, otp, userName);
   if (!sent) {
-    if (process.env.NODE_ENV === 'development' && process.env.DEV_OTP === 'true') {
+    if (process.env.DEV_OTP === 'true') {
       console.log(`[DEV] OTP for ${trimmedEmail}: ${otp}`);
-      res.json({ success: true, message: 'OTP sent (dev mode - check server console)' });
+      res.json({ success: true, message: 'OTP sent (dev mode - check server logs)' });
     } else {
       await Otp.deleteOne({ email: trimmedEmail });
-      return res.status(500).json({ error: 'Failed to send OTP. Configure EmailJS or set DEV_OTP=true for dev.' });
+      return res.status(500).json({
+        error: 'Failed to send OTP. Add DEV_OTP=true to backend env vars to get OTP in server logs, or enable "Allow API requests" in EmailJS Account → Security.',
+      });
     }
   } else {
     res.json({ success: true, message: 'OTP sent to your email.' });
@@ -194,7 +199,9 @@ app.post('/api/auth/verify-otp', async (req, res) => {
     await Otp.deleteOne({ email: trimmedEmail });
     return res.status(400).json({ error: 'OTP expired. Request a new one.' });
   }
-  if (stored.otp !== String(otp).trim()) {
+  const normalizedInput = String(otp || '').replace(/\D/g, '');
+  const normalizedStored = String(stored.otp || '').replace(/\D/g, '');
+  if (normalizedInput !== normalizedStored) {
     return res.status(400).json({ error: 'Invalid OTP.' });
   }
   await Otp.deleteOne({ email: trimmedEmail });
