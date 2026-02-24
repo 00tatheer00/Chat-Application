@@ -221,6 +221,8 @@ export default function AuthScreen({ mode = 'register', onSwitchMode, onBack }) 
                   id="otp"
                   className="login-input otp-input"
                   type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
                   placeholder="000000"
                   value={otp}
                   onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}

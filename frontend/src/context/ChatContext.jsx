@@ -252,7 +252,7 @@ export function ChatProvider({ children }) {
     if (socketRef.current) return socketRef.current;
 
     const socket = io(getApiUrl(), {
-      transports: ['websocket'],
+      transports: ['polling', 'websocket'],
       reconnection: true,
       reconnectionAttempts: 10,
     });

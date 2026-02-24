@@ -164,7 +164,7 @@ app.post('/api/auth/request-otp', async (req, res) => {
   await Otp.create({
     email: trimmedEmail,
     otp,
-    expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+    expiresAt: new Date(Date.now() + 30 * 60 * 1000),
     username: trimmedUsername || (await User.findOne({ email: trimmedEmail }))?.username,
     color: color || '#00a884',
   });
@@ -191,18 +191,19 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   if (!trimmedEmail || !otp) {
     return res.status(400).json({ error: 'Email and OTP are required.' });
   }
-  const stored = await Otp.findOne({ email: trimmedEmail });
+  const stored = await Otp.findOne({ email: trimmedEmail }).lean();
   if (!stored) {
-    return res.status(400).json({ error: 'OTP expired or invalid. Request a new one.' });
+    return res.status(400).json({ error: 'OTP not found. Request a new one.' });
   }
-  if (Date.now() > new Date(stored.expiresAt).getTime()) {
+  const expiresAt = new Date(stored.expiresAt).getTime();
+  if (Date.now() > expiresAt) {
     await Otp.deleteOne({ email: trimmedEmail });
     return res.status(400).json({ error: 'OTP expired. Request a new one.' });
   }
   const normalizedInput = String(otp || '').replace(/\D/g, '');
   const normalizedStored = String(stored.otp || '').replace(/\D/g, '');
   if (normalizedInput !== normalizedStored) {
-    return res.status(400).json({ error: 'Invalid OTP.' });
+    return res.status(400).json({ error: 'Invalid OTP. Check the code and try again.' });
   }
   await Otp.deleteOne({ email: trimmedEmail });
   let user = await User.findOne({ email: trimmedEmail });
